@@ -3,7 +3,6 @@ import numpy as np
 from xgboost import XGBClassifier
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.metrics import f1_score, confusion_matrix, classification_report
-
 DATA_DIR = "datasets/"
 
 # 1. Load data
@@ -14,6 +13,31 @@ val_answer = pd.read_csv(DATA_DIR + "click_validation_answer.csv")
 searchinfo = pd.read_csv(DATA_DIR + "searchinfo.csv")
 userinfo = pd.read_csv(DATA_DIR + "userinfo.csv")
 adinfo = pd.read_csv(DATA_DIR + "adinfo.csv")
+
+searchinfo = searchinfo.rename(columns={"CategoryID": "SearchCategoryID"})
+adinfo = adinfo.rename(columns={"CategoryID": "AdCategoryID"})
+
+# embeddings
+search_embs = np.load("datasets/searchinfo_text_embs.npy")
+ad_embs = np.load("datasets/adinfo_title_embs.npy")
+
+# mappings from IDs to embedding row indices
+search_id_to_idx = dict(zip(searchinfo["SearchID"], range(len(searchinfo))))
+ad_id_to_idx = dict(zip(adinfo["AdID"], range(len(adinfo))))
+
+
+def add_embedding_similarity(df):
+    search_idx = df["SearchID"].map(search_id_to_idx).values
+    ad_idx = df["AdID"].map(ad_id_to_idx).values
+
+    search_vecs = search_embs[search_idx]
+    ad_vecs = ad_embs[ad_idx]
+
+    df["SearchAdCosineSim"] = np.sum(search_vecs * ad_vecs, axis=1) / (
+        np.linalg.norm(search_vecs, axis=1) * np.linalg.norm(ad_vecs, axis=1) + 1e-8
+    )
+
+    return df
 
 print("Train shape:", train.shape)
 print("Validation query shape:", val_query.shape)
@@ -27,11 +51,15 @@ train = train.merge(searchinfo, on="SearchID", how="left")
 train = train.merge(userinfo, on="UserID", how="left")
 train = train.merge(adinfo, on="AdID", how="left")
 train["CategoryMatch"] = (train["SearchCategoryID"] == train["AdCategoryID"]).astype(int)
+train = add_embedding_similarity(train)
 
 val = val_answer.merge(searchinfo, on="SearchID", how="left")
 val = val.merge(userinfo, on="UserID", how="left")
 val = val.merge(adinfo, on="AdID", how="left")
 val["CategoryMatch"] = (val["SearchCategoryID"] == val["AdCategoryID"]).astype(int)
+val = add_embedding_similarity(val)
+
+# UserAgentID - A unique identifier of the user’s browser. - to detailed - no sense in this infromation alone
 
 feature_cols = [
     "Position",
@@ -41,11 +69,27 @@ feature_cols = [
     "SearchCategoryID",
     "AdCategoryID",
     "CategoryMatch",
-    "UserAgentID",
+    "SearchAdCosineSim",
+    # "UserAgentID",
     "UserAgentOSID",
     "UserDeviceID",
     "UserAgentFamilyID",
 ]
+
+# defining categorical variables because the differences in values may not have an impact
+categorical_cols = ['IsUserLoggedOn',
+                    'SearchCategoryID',
+                    'AdCategoryID',
+                    'CategoryMatch',
+                    'UserAgentOSID',
+                    'UserDeviceID',
+                    'UserAgentFamilyID']
+
+
+for col in categorical_cols:
+    train[col] = train[col].astype("category")
+    val[col] = val[col].astype("category")
+
 
 X_train = train[feature_cols].fillna(-1)
 y_train = train["IsClick"].astype(int)
@@ -76,6 +120,24 @@ print("\n=== HistCTR baseline ===")
 print("AUC:", baseline_auc)
 print("Gini:", baseline_gini)
 
+thresholds = np.linspace(0.001, 0.999, 999)
+
+best_threshold = 0.5
+best_f1 = -1
+
+for threshold in thresholds:
+    y_pred = (val["HistCTR"] >= threshold).astype(int)
+    f1 = f1_score(y_val, y_pred)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_threshold = threshold
+
+y_true_ctr = val["IsClick"].astype(int)
+y_pred_ctr = (val["HistCTR"] > 0.01).astype(int)
+print("F1 from base threshold:", f1_score(y_true_ctr, y_pred_ctr))
+print("F1 from changed threshold:", best_f1)
+
 
 # 5. Train XGBoost model with GridSearchCV
 num_pos = y_train.sum()
@@ -89,37 +151,20 @@ base_model = XGBClassifier(
     scale_pos_weight=scale_pos_weight_value,
     random_state=42,
     n_jobs=-1,
+    enable_categorical=True
 )
 
-# param_grid = {
-#     "n_estimators": [100, 300],
-#     "max_depth": [3, 4],
-#     "learning_rate": [0.03, 0.05, 0.1],
-#     "subsample": [0.8, 0.9],
-#     "colsample_bytree": [0.8, 0.9],
-#     "min_child_weight": [5, 10],
-#     "gamma": [0.1, 1]
-# }
-
-# param_grid = {
-#     "n_estimators": [300],
-#     "max_depth": [3],
-#     "learning_rate": [0.03],
-#     "subsample": [0.8],
-#     "colsample_bytree": [0.8],
-#     "min_child_weight": [10],
-#     "gamma": [1],
-#     "reg_alpha": [0.1],
-#     "tree_method":["hist"]
-# }
 param_grid = {
     "n_estimators": [300],
-    "max_depth": [4],
-    "learning_rate": [0.05],
-    "subsample": [0.9],
-    "colsample_bytree": [0.9],
-    "tree_method":["hist"]
+    "max_depth": [5],
+    "learning_rate": [0.03],
+    "subsample": [0.8],
+    "colsample_bytree": [0.8],
+    "min_child_weight": [10, 30, 50],
+    "gamma": [1],
+    "reg_alpha": [0.1]
 }
+
 
 cv = StratifiedKFold(
     n_splits=4,
@@ -141,6 +186,14 @@ grid_search.fit(X_train, y_train)
 
 model = grid_search.best_estimator_
 
+importances = pd.DataFrame({
+    "feature": X_train.columns,
+    "importance": model.feature_importances_
+}).sort_values("importance", ascending=False)
+
+print("\n=== Feature importances ===")
+print(importances.to_string(index=False))
+
 print("\n=== Best XGBoost parameters ===")
 print(grid_search.best_params_)
 print("Best cross-validation AUC:", grid_search.best_score_)
@@ -148,10 +201,6 @@ print("Best cross-validation Gini:", 2 * grid_search.best_score_ - 1)
 
 # 6. Predict probability of click, not binary class 0/1
 val["click_probability"] = model.predict_proba(X_val)[:, 1]
-
-print("\nExample predicted probabilities:")
-print(val[["SearchID", "AdID", "click_probability", "IsClick"]].head(10).to_string(index=False))
-
 
 # 7. XGBoost evaluated with AUC and Gini
 ranks = val["click_probability"].rank(method="average")
