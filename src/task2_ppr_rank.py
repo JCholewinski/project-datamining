@@ -383,7 +383,7 @@ def predict_dataframe(query_df, output_path):
 
 
 print("Evaluating validation...")
-val_pred = predict_dataframe(val_query, OUT_DIR + "ad_validation_answer.csv")
+val_pred = predict_dataframe(val_query, OUT_DIR + "ad_validation_predict.csv")
 print_validation_metrics(val_pred, val_answer)
 
 test_path = DATA_DIR + "ad_test_query.csv"
