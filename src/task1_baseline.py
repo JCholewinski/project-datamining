@@ -3,7 +3,11 @@ import numpy as np
 from xgboost import XGBClassifier
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.metrics import f1_score, confusion_matrix, classification_report
+import os
+
 DATA_DIR = "datasets/"
+OUT_DIR = "outputs_XGBOOST/"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 # 1. Load data
 train = pd.read_csv(DATA_DIR + "search_stream_training.csv")
@@ -213,21 +217,38 @@ print("\n=== XGBoost probability model ===")
 print("AUC:", auc)
 print("Gini:", gini)
 
-# 8. Choose threshold for F1-score
+# 8. Predict on test set and write output
+test_path = DATA_DIR + "click_test_query.csv"
 
-thresholds = np.linspace(0.001, 0.999, 999)
+if os.path.exists(test_path):
+    print("Predicting test...")
+    test_query = pd.read_csv(test_path)
 
-best_threshold = 0.5
-best_f1 = -1
+    test = test_query.merge(searchinfo, on="SearchID", how="left")
+    test = test.merge(userinfo, on="UserID", how="left")
+    test = test.merge(adinfo, on="AdID", how="left")
 
-for threshold in thresholds:
-    y_pred = (val["click_probability"] >= threshold).astype(int)
-    f1 = f1_score(y_val, y_pred)
+    test["CategoryMatch"] = (
+        test["SearchCategoryID"] == test["AdCategoryID"]
+    ).astype(int)
 
-    if f1 > best_f1:
-        best_f1 = f1
-        best_threshold = threshold
+    test = add_embedding_similarity(test)
 
-print("\n=== Best threshold for F1 ===")
-print("Best threshold:", best_threshold)
-print("Best F1:", best_f1)
+    for col in categorical_cols:
+        if col in test.columns:
+            test[col] = test[col].astype("category")
+
+    X_test = test[feature_cols].fillna(-1)
+
+    test_proba = model.predict_proba(X_test)[:, 1]
+    test_pred = (test_proba >= best_threshold).astype(int)
+
+    test_answer = test_query.copy()
+    test_answer["IsClick"] = test_pred
+
+    output_path = OUT_DIR + "click_test_answer.csv"
+    test_answer.to_csv(output_path, index=False)
+
+    print("Wrote:", output_path)
+else:
+    print("No click_test_query.csv found, skipping test prediction.")
