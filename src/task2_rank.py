@@ -7,16 +7,16 @@ from tqdm import tqdm
 # LOAD DATA
 # =========================================================
 
-train = pd.read_csv("search_stream_training.csv")
+train = pd.read_csv("/datasets/search_stream_training.csv")
 
-search = pd.read_csv("searchinfo.csv")
+search = pd.read_csv("/datasets/searchinfo.csv")
 
-ad = pd.read_csv("adinfo.csv")
+ad = pd.read_csv("/datasets/adinfo.csv")
 
-val_query = pd.read_csv("ad_validation_query.csv")
-val_answer = pd.read_csv("ad_validation_answer.csv")
+val_query = pd.read_csv("/datasets/ad_validation_query.csv")
+val_answer = pd.read_csv("/datasets/ad_validation_answer.csv")
 
-test_query = pd.read_csv("ad_test_query.csv")
+test_query = pd.read_csv("/datasets/ad_test_query.csv")
 
 # =========================================================
 # LOAD EMBEDDINGS
